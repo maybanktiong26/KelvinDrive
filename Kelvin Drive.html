@@ -137,7 +137,6 @@
         <input type="password" id="passwordInput" placeholder="Enter password" autocomplete="off">
         <button id="unlockBtn">UNLOCK</button>
         <div id="loginError" class="error-msg"></div>
-        <div style="font-size:0.7rem; margin-top:16px; color:#6fbbff;">Default password: 0000</div>
     </div>
 </div>
 
@@ -145,40 +144,38 @@
     <div class="app-container">
         <div class="header glass-panel">
             <div class="logo"><h1>📁 KELVIN DRIVE</h1></div>
-            <div class="badge">🌐 REAL-TIME SYNC · ANY DEVICE</div>
+            <div class="badge">🌐 实时同步 · 多设备共享 · 支持多选文件</div>
         </div>
         <div class="drive-layout">
             <div class="sidebar glass-panel">
-                <div class="folder-header"><span>📂 FOLDERS</span><span>delete any</span></div>
+                <div class="folder-header"><span>📂 文件夹</span><span>可删除任意</span></div>
                 <div class="folder-scroll" id="folderTreeContainer"></div>
-                <div id="newFolderAction" class="new-folder-btn">+ NEW FOLDER (inside current)</div>
+                <div id="newFolderAction" class="new-folder-btn">+ 新建文件夹 (在当前文件夹内)</div>
+                <div style="margin-top: 18px; font-size:0.7rem; color:#6fbbff;">✨ 支持多选文件上传 · 拖拽上传 · 跨设备秒同步</div>
             </div>
             <div class="main-area">
                 <div class="upload-card glass-panel">
                     <div id="dropZone" class="dropzone">
-                        📤 DROP FILES HERE or CLICK TO UPLOAD
+                        📤 拖拽文件至此区域 或 点击选择文件 (支持多选 Ctrl/Cmd + 点击)
                         <input type="file" id="fileInput" multiple style="display: none;">
                     </div>
                     <div id="selectedPreview"></div>
-                    <button id="uploadBtn" class="upload-btn">🚀 UPLOAD TO CURRENT FOLDER</button>
+                    <button id="uploadBtn" class="upload-btn">🚀 上传到当前文件夹</button>
                 </div>
                 <div id="fileGridContainer" class="file-grid">
-                    <div class="empty-area">✨ Loading files...</div>
+                    <div class="empty-area">✨ 加载中...</div>
                 </div>
             </div>
         </div>
-        <footer>🔐 Real-time cross-device sync · Upload from phone, see on computer instantly</footer>
+        <footer>🔐 密码保护 · 所有设备实时同步 · 上传后立刻出现在其他设备</footer>
     </div>
 </div>
 <div id="toastMessage" class="toast" style="opacity:0; visibility:hidden;"></div>
 
 <script>
-    // ============================================================
-    // ✅ 您的 Supabase 配置已自动填好，无需修改 ✅
-    // ============================================================
+    // Supabase 配置
     const SUPABASE_URL = "https://sjhflafczaeikazgdmsm.supabase.co";
     const SUPABASE_ANON_KEY = "sb_publishable_ljRPWsEE4O_qTvlqrHalIA_JLvJ6WLY";
-    // ============================================================
 
     let supabaseClient = null;
     let currentFolderId = "root";
@@ -198,60 +195,112 @@
     }
 
     async function checkPassword(input) {
-        const { data, error } = await supabaseClient.from('app_config').select('value').eq('key', 'password').single();
-        if (error || !data) return input === "0000";
-        return input === data.value;
+        try {
+            const { data, error } = await supabaseClient.from('app_config').select('value').eq('key', 'password').maybeSingle();
+            if (error || !data) return input === "0000";
+            return input === data.value;
+        } catch(e) {
+            return input === "0000";
+        }
     }
 
     async function loadFolders() {
-        const { data, error } = await supabaseClient.from('folders').select('*');
-        if (error) return [];
-        return data;
+        try {
+            const { data, error } = await supabaseClient.from('folders').select('*');
+            if (error) return [];
+            return data || [];
+        } catch(e) { return []; }
     }
 
     async function loadFiles() {
-        const { data, error } = await supabaseClient.from('files').select('*');
-        if (error) return [];
-        return data;
+        try {
+            const { data, error } = await supabaseClient.from('files').select('*');
+            if (error) return [];
+            return data || [];
+        } catch(e) { return []; }
     }
 
     async function uploadFile(file, folderId) {
-        const fileId = `${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+        const safeName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+        const fileId = `${Date.now()}_${safeName}`;
         const filePath = `${folderId}/${fileId}`;
         
-        const { error: uploadError } = await supabaseClient.storage.from('drive').upload(filePath, file);
-        if (uploadError) throw uploadError;
+        console.log("开始上传:", file.name);
         
+        // 1. 上传到 Storage
+        const { error: uploadError } = await supabaseClient.storage.from('drive').upload(filePath, file, {
+            cacheControl: '3600',
+            upsert: false
+        });
+        if (uploadError) {
+            console.error("Storage上传错误:", uploadError);
+            throw new Error(`存储上传失败: ${uploadError.message}`);
+        }
+        
+        // 2. 获取公开 URL
         const { data: urlData } = supabaseClient.storage.from('drive').getPublicUrl(filePath);
         
-        await supabaseClient.from('files').insert({
+        // 3. 在 files 表中创建记录
+        const { error: insertError } = await supabaseClient.from('files').insert({
             id: fileId,
             name: file.name,
             folder_id: folderId,
             size: file.size,
-            type: file.type,
+            type: file.type || 'application/octet-stream',
             created_at: Date.now(),
             file_url: urlData.publicUrl
         });
+        
+        if (insertError) {
+            console.error("数据库插入错误:", insertError);
+            throw new Error(`数据库写入失败: ${insertError.message}`);
+        }
+        
+        console.log("上传成功:", file.name);
         return true;
     }
 
     async function deleteFile(fileId, fileUrl) {
-        const pathPart = fileUrl.split('/').slice(-2).join('/');
-        await supabaseClient.storage.from('drive').remove([pathPart]);
+        try {
+            const pathPart = fileUrl.split('/').slice(-2).join('/');
+            await supabaseClient.storage.from('drive').remove([pathPart]);
+        } catch(e) { console.warn('Storage delete error:', e); }
         await supabaseClient.from('files').delete().eq('id', fileId);
     }
 
     async function createFolder(name, parentId) {
-        const folderId = `folder_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-        await supabaseClient.from('folders').insert({
-            id: folderId,
-            name: name,
-            parent_id: parentId,
-            path: '/',
-            created_at: Date.now()
-        });
-        return folderId;
+        if (!name || !name.trim()) return false;
+        
+        const folderName = name.trim();
+        const existingFolders = await loadFolders();
+        const exists = existingFolders.some(f => f.parent_id === parentId && f.name === folderName);
+        if (exists) {
+            showToast("同名文件夹已存在", 1500);
+            return false;
+        }
+        
+        const folderId = `folder_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+        
+        try {
+            const { error } = await supabaseClient.from('folders').insert({
+                id: folderId,
+                name: folderName,
+                parent_id: parentId,
+                path: '/',
+                created_at: Date.now()
+            });
+            
+            if (error) {
+                console.error('创建文件夹错误:', error);
+                showToast("创建失败: " + (error.message || "未知错误"), 2000);
+                return false;
+            }
+            return folderId;
+        } catch(e) {
+            console.error('创建文件夹异常:', e);
+            showToast("创建失败，请检查 Supabase RLS 设置", 2000);
+            return false;
+        }
     }
 
     async function deleteFolder(folderId) {
@@ -270,23 +319,23 @@
         const filteredFiles = files.filter(f => f.folder_id === currentFolderId);
         
         if (filteredFiles.length === 0) {
-            container.innerHTML = '<div class="empty-area">✨ Empty folder · Upload files (syncs to all devices instantly)</div>';
+            container.innerHTML = '<div class="empty-area">✨ 空文件夹 · 上传文件后会自动同步到所有设备</div>';
         } else {
             let html = '';
             for (let f of filteredFiles) {
                 let icon = '📄';
-                if (f.type.includes('pdf')) icon = '📘';
-                else if (f.type.includes('image')) icon = '🖼️';
-                else if (f.name.match(/\.(zip|rar|7z)$/i)) icon = '🗜️';
-                const sizeStr = formatBytes(f.size);
-                const dateStr = new Date(f.created_at).toLocaleString();
+                if (f.type && f.type.includes('pdf')) icon = '📘';
+                else if (f.type && f.type.includes('image')) icon = '🖼️';
+                else if (f.name && f.name.match(/\.(zip|rar|7z)$/i)) icon = '🗜️';
+                const sizeStr = formatBytes(f.size || 0);
+                const dateStr = f.created_at ? new Date(f.created_at).toLocaleString() : '未知';
                 html += `<div class="file-card">
                             <div class="file-icon">${icon}</div>
-                            <div class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(truncateStr(f.name, 40))}</div>
+                            <div class="file-name" title="${escapeHtml(f.name || '未命名')}">${escapeHtml(truncateStr(f.name || '未命名', 40))}</div>
                             <div class="file-meta">${sizeStr} · ${dateStr}</div>
                             <div class="file-actions">
-                                <button class="btn-download" data-url="${f.file_url}" data-name="${escapeHtml(f.name)}">⬇️ DOWNLOAD</button>
-                                <button class="btn-delete-file" data-id="${f.id}" data-url="${f.file_url}">🗑️ DELETE</button>
+                                <button class="btn-download" data-url="${f.file_url || ''}" data-name="${escapeHtml(f.name || '下载')}">⬇️ 下载</button>
+                                <button class="btn-delete-file" data-id="${f.id}" data-url="${f.file_url || ''}">🗑️ 删除</button>
                             </div>
                         </div>`;
             }
@@ -294,15 +343,17 @@
             
             document.querySelectorAll('.btn-download').forEach(btn => {
                 btn.addEventListener('click', () => {
-                    window.open(btn.dataset.url, '_blank');
+                    const url = btn.dataset.url;
+                    if (url) window.open(url, '_blank');
+                    else showToast("文件链接无效", 1000);
                 });
             });
             document.querySelectorAll('.btn-delete-file').forEach(btn => {
                 btn.addEventListener('click', async () => {
-                    if (confirm("Permanently delete this file? It will disappear on all devices.")) {
+                    if (confirm("永久删除此文件？所有设备将无法再看到它。")) {
                         await deleteFile(btn.dataset.id, btn.dataset.url);
                         await renderUI();
-                        showToast("File deleted (synced to all devices)", 1500);
+                        showToast("文件已删除 (已同步所有设备)", 1500);
                     }
                 });
             });
@@ -327,9 +378,9 @@
                             <div class="folder-item ${isActive ? 'folder-active' : ''}" data-id="${node.id}">
                                 <div class="folder-name" data-id="${node.id}">
                                     <span>📁</span>
-                                    <span>${escapeHtml(node.name)}</span>
+                                    <span>${escapeHtml(node.name || '未命名')}</span>
                                 </div>
-                                ${canDelete ? `<button class="del-folder" data-id="${node.id}" data-name="${escapeHtml(node.name)}">🗑️</button>` : ''}
+                                ${canDelete ? `<button class="del-folder" data-id="${node.id}" data-name="${escapeHtml(node.name || '')}">🗑️</button>` : ''}
                             </div>`;
                 if (node.children && node.children.length) {
                     html += `<div class="child-indent">${renderTree(node.children)}</div>`;
@@ -345,7 +396,7 @@
             const fid = el.getAttribute('data-id');
             if (fid) {
                 el.addEventListener('click', (e) => {
-                    if (e.target.classList.contains('del-folder')) return;
+                    if (e.target.classList && e.target.classList.contains('del-folder')) return;
                     currentFolderId = fid;
                     renderUI();
                 });
@@ -357,11 +408,11 @@
                 e.stopPropagation();
                 const fid = btn.dataset.id;
                 const fname = btn.dataset.name;
-                if (confirm(`⚠️ Delete folder "${fname}" and ALL contents? This is permanent and syncs everywhere.`)) {
+                if (confirm(`⚠️ 删除文件夹「${fname}」及其所有内容？此操作不可逆，且会同步到所有设备。`)) {
                     await deleteFolder(fid);
                     if (currentFolderId === fid) currentFolderId = 'root';
                     await renderUI();
-                    showToast(`Deleted: ${fname}`, 1500);
+                    showToast(`已删除: ${fname}`, 1500);
                 }
             });
         });
@@ -371,21 +422,25 @@
         await renderUI();
         
         if (realtimeChannel) {
-            await supabaseClient.removeChannel(realtimeChannel);
+            try { await supabaseClient.removeChannel(realtimeChannel); } catch(e) {}
         }
         realtimeChannel = supabaseClient.channel('db-changes')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'files' }, () => renderUI())
             .on('postgres_changes', { event: '*', schema: 'public', table: 'folders' }, () => renderUI())
             .subscribe();
         
-        let pendingFiles = [];
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
         const selectedPreview = document.getElementById('selectedPreview');
         
         function updatePreview(files) {
-            if (!files.length) { selectedPreview.innerHTML = ''; return; }
-            selectedPreview.innerHTML = `<span class="selected-preview">✨ ${files.length} file(s) selected</span>`;
+            if (!files || files.length === 0) { 
+                selectedPreview.innerHTML = ''; 
+                return; 
+            }
+            const fileNames = Array.from(files).map(f => f.name).slice(0, 3).join(', ');
+            const more = files.length > 3 ? ` 等${files.length}个文件` : '';
+            selectedPreview.innerHTML = `<span class="selected-preview">✨ 已选择 ${files.length} 个文件: ${fileNames}${more}</span>`;
         }
         
         dropZone.addEventListener('click', () => fileInput.click());
@@ -396,35 +451,74 @@
             dropZone.classList.remove('drag-over');
             const files = Array.from(e.dataTransfer.files);
             if (files.length) {
+                updatePreview(files);
+                let success = 0;
+                let errors = [];
                 for (let file of files) {
-                    showToast(`Uploading ${file.name}...`, 1000);
-                    await uploadFile(file, currentFolderId);
+                    try {
+                        showToast(`上传中: ${file.name}`, 800);
+                        await uploadFile(file, currentFolderId);
+                        success++;
+                    } catch(err) {
+                        console.error(err);
+                        errors.push(`${file.name}: ${err.message}`);
+                    }
                 }
-                showToast("✅ Upload complete! Synced to all devices.", 2000);
+                if (success > 0) {
+                    showToast(`✅ 成功上传 ${success} 个文件，已同步到所有设备`, 2500);
+                }
+                if (errors.length > 0) {
+                    showToast(`❌ 失败: ${errors[0]}`, 4000);
+                }
+                updatePreview([]);
                 await renderUI();
             }
         });
         
         fileInput.addEventListener('change', async (e) => {
             const files = Array.from(e.target.files);
-            for (let file of files) {
-                await uploadFile(file, currentFolderId);
+            if (files.length) {
+                updatePreview(files);
+                let success = 0;
+                let errors = [];
+                for (let file of files) {
+                    try {
+                        await uploadFile(file, currentFolderId);
+                        success++;
+                    } catch(err) {
+                        console.error(err);
+                        errors.push(`${file.name}: ${err.message}`);
+                    }
+                }
+                if (success > 0) {
+                    showToast(`✅ 成功上传 ${success} 个文件，已同步到所有设备`, 2500);
+                }
+                if (errors.length > 0) {
+                    showToast(`❌ 失败: ${errors[0]}`, 4000);
+                }
+                updatePreview([]);
+                await renderUI();
+                fileInput.value = '';
             }
-            showToast(`✅ ${files.length} file(s) uploaded → visible on ALL devices now`, 2500);
-            await renderUI();
-            fileInput.value = '';
         });
         
         document.getElementById('uploadBtn').addEventListener('click', () => fileInput.click());
         
-        document.getElementById('newFolderAction').addEventListener('click', async () => {
-            let name = prompt("Enter new folder name:");
-            if (name && name.trim()) {
-                await createFolder(name.trim(), currentFolderId);
-                await renderUI();
-                showToast(`Folder "${name}" created`, 1500);
-            }
-        });
+        const newFolderBtn = document.getElementById('newFolderAction');
+        if (newFolderBtn) {
+            const freshBtn = newFolderBtn.cloneNode(true);
+            newFolderBtn.parentNode.replaceChild(freshBtn, newFolderBtn);
+            freshBtn.addEventListener('click', async () => {
+                let name = prompt("请输入新文件夹名称:", "新文件夹");
+                if (name && name.trim()) {
+                    const result = await createFolder(name.trim(), currentFolderId);
+                    if (result) {
+                        await renderUI();
+                        showToast(`✅ 文件夹「${name}」已创建`, 1500);
+                    }
+                }
+            });
+        }
     }
 
     async function unlockApp() {
@@ -433,18 +527,23 @@
             document.getElementById('passwordModal').style.display = 'none';
             document.getElementById('mainApp').style.display = 'block';
             await initMainApp();
-            showToast("🔓 Access granted · Real-time sync active across all devices", 3000);
+            showToast("🔓 解锁成功 · 跨设备实时同步已激活", 3000);
         } else {
-            document.getElementById('loginError').innerText = "Wrong password";
+            document.getElementById('loginError').innerText = "密码错误";
         }
     }
 
     async function bootstrap() {
         await loadSupabase();
         
-        const { error } = await supabaseClient.from('folders').select('id').limit(1);
-        if (error) {
-            document.getElementById('loginError').innerHTML = "⚠️ Database not ready. Please run SQL setup in Supabase SQL Editor first.";
+        try {
+            const { error } = await supabaseClient.from('folders').select('id').limit(1);
+            if (error && error.message && error.message.includes('relation')) {
+                document.getElementById('loginError').innerHTML = "⚠️ 数据库未就绪，请在 Supabase SQL Editor 中执行建表语句";
+                return;
+            }
+        } catch(e) {
+            document.getElementById('loginError').innerHTML = "⚠️ 连接失败，请检查 Supabase 配置";
             return;
         }
         
@@ -464,9 +563,23 @@
         }, dur);
     }
     
-    function formatBytes(b) { if (!b) return '0 B'; if (b < 1024) return b + ' B'; if (b < 1048576) return (b / 1024).toFixed(1) + ' KB'; return (b / 1048576).toFixed(1) + ' MB'; }
-    function escapeHtml(s) { if (!s) return ''; return s.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m])); }
-    function truncateStr(s, l) { if (s.length <= l) return s; return s.slice(0, l - 2) + '..'; }
+    function formatBytes(b) { 
+        if (!b || b === 0) return '0 B'; 
+        if (b < 1024) return b + ' B'; 
+        if (b < 1048576) return (b / 1024).toFixed(1) + ' KB'; 
+        return (b / 1048576).toFixed(1) + ' MB'; 
+    }
+    
+    function escapeHtml(s) { 
+        if (!s) return ''; 
+        return s.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m])); 
+    }
+    
+    function truncateStr(s, l) { 
+        if (!s) return ''; 
+        if (s.length <= l) return s; 
+        return s.slice(0, l - 2) + '..'; 
+    }
     
     bootstrap();
 </script>
